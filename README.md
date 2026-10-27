@@ -11,7 +11,13 @@ Today, minting a token and providing its liquidity are two separate steps, done 
 1. A user deposits into the issuer's contract to mint.
 2. Someone else approves and deposits that token plus a paired asset into an AMM pool.
 
-Consequences, measured on Everstrat (Ethereum mainnet):
+### Why Everstrat is the test case
+
+[Everstrat](https://everstrat.xyz) is an ETH yield protocol on Ethereum mainnet, live since 1 Sep 2026. Users deposit ETH and mint EVE, a reserve-backed token whose value is a share of the protocol's book. The book is **100% Uniswap liquidity**: every strategy is a concentrated-liquidity position on a Uniswap v3 pool (WETH/USDC, WETH/USDT, UNI/WETH), marked on a 30-minute TWAP plus Chainlink. So Everstrat earns its yield by providing liquidity to Uniswap, yet its own token has no reliable liquidity. That gap is exactly what this hook closes, for Everstrat and for every vault-style token with the same shape.
+
+It is small (about 5.2 ETH of fair value), but it gives this prototype what a whitepaper can't: a live, on-chain fair value, a real mint/burn token, and measured data on what the two-step model costs.
+
+Consequences, measured on Everstrat's live book:
 
 - **Price drift leaks value.** The pool price wanders from the mint price; 21 of 38 entries were arbitrageable right after mint (typically +2–6%, up to +26.6%).
 - **A fixed premium decays.** The pool premium over NAV fell from +20.6% to +0.41%.
