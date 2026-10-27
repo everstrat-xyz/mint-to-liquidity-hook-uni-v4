@@ -13,16 +13,13 @@ Today, minting a token and providing its liquidity are two separate steps, done 
 
 ### Why Everstrat is the test case
 
-[Everstrat](https://everstrat.xyz) is an ETH yield protocol on Ethereum mainnet, live since 1 Sep 2026. Users deposit ETH and mint EVE, a reserve-backed token whose value is a share of the protocol's book. The book is **100% Uniswap liquidity**: every strategy is a concentrated-liquidity position on a Uniswap v3 pool (WETH/USDC, WETH/USDT, UNI/WETH), marked on a 30-minute TWAP plus Chainlink. So Everstrat earns its yield by providing liquidity to Uniswap, yet its own token has no reliable liquidity. That gap is exactly what this hook closes, for Everstrat and for every vault-style token with the same shape.
+[Everstrat](https://everstrat.xyz) is an ETH yield protocol on Ethereum mainnet. Users deposit ETH and mint EVE, a token backed by the protocol's book, which is **100% Uniswap v3 liquidity**. Everstrat earns its yield by providing liquidity to Uniswap, yet its own token has no reliable liquidity. That gap is what this hook closes, for Everstrat and for every vault-style token like it.
 
-It is small (about 5.2 ETH of fair value), but it gives this prototype what a whitepaper can't: a live, on-chain fair value, a real mint/burn token, and measured data on what the two-step model costs.
+What the two-step model costs, measured on Everstrat:
 
-Consequences, measured on Everstrat's live book:
-
-- **Price drift leaks value.** The pool price wanders from the mint price; 21 of 38 entries were arbitrageable right after mint (typically +2–6%, up to +26.6%).
-- **A fixed premium decays.** The pool premium over NAV fell from +20.6% to +0.41%.
-- **Idle capital.** Minted ETH waits for a keeper to deploy it, and the keeper only fires above 0.1 ETH.
-- **Two quotes, one token.** A direct mint/burn path and a pool path quote the same token differently, which is an arbitrage the issuer creates itself.
+- **Value leaks to arbitrageurs.** 21 of 38 mints could be arbitraged against the pool right after, by up to 26.6%.
+- **Idle capital.** Minted ETH waits for a keeper to deploy it.
+- **Two quotes for one token.** The mint path and the pool price the same token differently.
 
 ## 2. Design summary
 
