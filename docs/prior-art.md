@@ -10,7 +10,7 @@ We found no hook that combines all three parts of this design:
 2. the issuer as the market of last resort, filling swaps at its mint price (ceiling) and redemption price (floor) only when the pool can't fill in band;
 3. the protocol, not MEV bots, keeping the arbitrage profit when the pool is pulled back into the band.
 
-Each part exists elsewhere on its own. Routing a swap through an issuer's mint or redeem is already standard, including in hooks Uniswap Labs ships. The novelty is the hybrid: issuer-backed edges around a live market, with different mint and redemption prices and an exit capacity limit.
+Each part exists elsewhere on its own. Routing a swap through an issuer's mint or redeem is already standard, including in hooks Uniswap Labs ships. The novelty is the hybrid: issuer-backed edges around a live market. It also handles two things issuer-backed tokens commonly have and existing hooks don't: different mint and redemption prices (fees, premiums), and redemptions that can't always be paid at once (withdrawal queues, cooldowns, delayed settlement).
 
 ## 1. Wrapper and vault conversion hooks
 
@@ -28,9 +28,18 @@ These turn every swap into a mint or redeem at the issuer's rate, with no LPs. T
 
 **How we differ:**
 
-- **One rate vs. a band.** These hooks have one conversion rate. EVE mints at a premium over NAV and redeems at NAV, so it needs a band with two edges.
-- **They replace the market.** No LPs, no fees, no price discovery. This hook keeps the pool and only steps in at the edges.
-- **Immediate exits only.** They assume every redemption can be paid in the same transaction. This hook caps floor fills at the issuer's immediate exit capacity and lets the floor go soft beyond it.
+- **They replace the market.** Every swap is a conversion: no LPs, no fees for LPs, no price discovery. This hook keeps the pool and only calls the issuer at the edges.
+- **One rate vs. a band.** A conversion hook has one rate. When an issuer charges mint or redemption fees, or mints at a premium, its two prices differ, and that gap is where a market can trade.
+- **Immediate exits only.** They assume every redemption is paid in the same transaction. LSTs with withdrawal queues, stablecoins with cooldowns and RWA tokens with delayed settlement can't promise that. This hook caps floor fills at what the issuer can pay out now and lets the floor go soft beyond it.
+
+**Why not just use `ERC4626Hook`?** For a vault that only needs conversion, it's the right tool, and we should say so. For our case it falls short in four ways:
+
+1. **It only fits ERC-4626 vaults.** In ERC-4626 the vault contract *is* the share token. Tokens issued by a separate contract (EVE, most LSTs, most stablecoins) would need a wrapped copy, which splits their liquidity.
+2. **Routers can't call it as is.** According to the hooklist review, it reads `(recipient, payer)` from `hookData` and pulls tokens from the payer directly. Standard routers and aggregators don't send that, so it needs custom integration.
+3. **It converts between the vault's asset and its shares.** There's no native-ETH leg unless the vault's asset is WETH.
+4. **It assumes synchronous redemption**, as ERC-4626 `redeem` does.
+
+Our ERC-4626 adapter (production scope) would let the same vaults get a market on top of conversion.
 
 **What to reuse:** `WstETHRoutingHook` solves a real problem this hook has too. The v4 Quoter can't simulate a hook that mints, so routers can't quote the pool unless a simulation path exists.
 

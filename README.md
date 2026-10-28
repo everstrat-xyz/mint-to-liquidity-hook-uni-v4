@@ -13,19 +13,21 @@ A new token needs a market, and a market needs liquidity. Today, minting a token
 
 Until step 2 happens, the token has no market. Even once it has one, the issuer and the pool price the same token independently. Outside arbitrageurs close the gap when they bother to and keep the profit, while buyers overpay and sellers get too little.
 
-### Why Everstrat is the test case
+### Which tokens this is for
 
-[Everstrat](https://everstrat.xyz) is an ETH yield protocol on Ethereum mainnet. Users deposit ETH and mint EVE, a token backed by the protocol's book, which is **100% Uniswap v3 liquidity**. Everstrat earns its yield by providing liquidity to Uniswap, yet its own token has no reliable liquidity. That gap is what this hook closes, for Everstrat and for every issuer-backed token like it.
+Any token whose issuer will mint and redeem it onchain: vault shares, liquid staking tokens, yield-bearing stablecoins, RWA and NAV tokens, bonding-curve tokens. Two features are common across them, and existing hooks handle neither (see [prior art](docs/prior-art.md)):
 
-Everstrat's AMM contract already quotes both sides of EVE:
+- **Two prices, not one.** Mint and redemption rarely happen at the same price. Mint fees, redemption fees, entry and exit fees on vaults, and issuance premiums all open a gap between them. The hook treats that gap as a band and lets the market trade inside it.
+- **Exits that can't always be paid at once.** LSTs have withdrawal queues, some stablecoins have cooldowns, and RWA tokens settle days later. The hook only redeems what the issuer can pay out immediately, so the floor holds up to that capacity and is soft beyond it.
 
-- **Mint price:** `AMM.enter` mints EVE at a premium over NAV, `NAV / (supply × connectorWeight)`.
-- **Redemption price:** `AMM.exit` redeems EVE at NAV, `NAV / supply`.
+### First integration: Everstrat
+
+[Everstrat](https://everstrat.xyz) is an ETH yield protocol on Ethereum mainnet. Users deposit ETH and mint EVE, a token backed by the protocol's book, which is **100% Uniswap v3 liquidity**. Everstrat earns its yield by providing liquidity to Uniswap, yet its own token has no reliable liquidity. EVE has both features above: it mints at a premium over NAV and redeems at NAV, and redemptions beyond the protocol's free ETH are queued.
 
 What the two-step model costs, measured on Everstrat:
 
 - **Value leaks to arbitrageurs.** 21 of 38 mints could be arbitraged against the pool right after, by up to 26.6%.
-- **Two quotes for one token.** The AMM and the pool price EVE differently, and nothing keeps them aligned.
+- **Two quotes for one token.** The issuer and the pool price EVE differently, and nothing keeps them aligned.
 
 ## 2. Design summary
 
@@ -51,7 +53,7 @@ pool price below  │  hook buys from the pool, redeems at the floor       │  
 - **Profit stays with the protocol.** The spread between an out-of-band pool price and the band edge goes to the issuer's beneficiary.
 - **LPs are optional.** Liquidity is permissionless. LPs who join earn normal v4 fees by quoting inside the band, which tightens the spread over time.
 
-Swapping through an issuer's mint or redeem already exists (Uniswap Labs' wrapper hooks, ERC-4626 hooks). What's new here is keeping a live market between the issuer's two prices. See [docs/prior-art.md](docs/prior-art.md).
+**How it relates to conversion hooks.** Swapping straight through an issuer already exists: Uniswap Labs' WETH and wstETH hooks, and ERC-4626 hooks such as `ERC4626Hook`. Those turn the pool into a converter, with no LPs and one rate. If a token only needs conversion, they are the right tool. This hook covers the case where the token should also have a market: LPs and price discovery between the issuer's two prices, with the issuer filling swaps only at the edges. See [docs/prior-art.md](docs/prior-art.md).
 
 ## 3. Direct fills (market of last resort)
 
