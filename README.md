@@ -51,6 +51,8 @@ pool price below  │  hook buys from the pool, redeems at the floor       │  
 - **Profit stays with the protocol.** The spread between an out-of-band pool price and the band edge goes to the issuer's beneficiary.
 - **LPs are optional.** Liquidity is permissionless. LPs who join earn normal v4 fees by quoting inside the band, which tightens the spread over time.
 
+Swapping through an issuer's mint or redeem already exists (Uniswap Labs' wrapper hooks, ERC-4626 hooks). What's new here is keeping a live market between the issuer's two prices. See [docs/prior-art.md](docs/prior-art.md).
+
 ## 3. Direct fills (market of last resort)
 
 In `beforeSwap`, after the drift rebalance (§4), the hook fills the swap itself when either of these holds:
