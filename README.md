@@ -53,7 +53,7 @@ pool price below  │  hook buys from the pool, redeems at the floor       │  
 - **Profit stays with the protocol.** The spread between an out-of-band pool price and the band edge goes to the issuer's beneficiary.
 - **LPs are optional.** Liquidity is permissionless. LPs who join earn normal v4 fees by quoting inside the band, which tightens the spread over time.
 
-**How it relates to conversion hooks.** Swapping straight through an issuer already exists: Uniswap Labs' WETH and wstETH hooks, and ERC-4626 hooks such as `ERC4626Hook`. Those turn the pool into a converter, with no LPs and one rate. If a token only needs conversion, they are the right tool. This hook covers the case where the token should also have a market: LPs and price discovery between the issuer's two prices, with the issuer filling swaps only at the edges. See [docs/prior-art.md](docs/prior-art.md).
+**How it relates to conversion hooks.** Swapping straight through an issuer already exists: Uniswap Labs' WETH and wstETH hooks, and ERC-4626 hooks such as `ERC4626Hook`. Those turn the pool into a converter, with no LPs and one rate. If a token only needs conversion, they are the right tool, and this hook can act as one too: an issuer that sets `redeemPrice() = 0` gets a single price for buys and sells (§5). Beyond that, it covers the case where the token should have a market: LPs and price discovery between the issuer's two prices, with the issuer filling swaps only at the edges. See [docs/prior-art.md](docs/prior-art.md).
 
 ## 3. Direct fills (market of last resort)
 
@@ -73,7 +73,7 @@ A direct fill returns a `BeforeSwapDelta` (custom-curve pattern), so the v4 curv
 
 "Pay to the PoolManager" is `settle{value}` for native ETH, and `sync` → transfer → `settle` for an ERC-20.
 
-Exact-input and exact-output are both supported, and rounding always favours the issuer. A sell larger than the issuer's immediate exit capacity (`maxRedeemNow()`) is filled up to that capacity, and the rest goes to the curve. A token without a redemption price gets direct buys only.
+Exact-input and exact-output are both supported, and rounding always favours the issuer. A sell larger than the issuer's immediate exit capacity (`maxRedeemNow()`) is filled up to that capacity, and the rest goes to the curve. A token with no exit capacity (`maxRedeemNow() = 0`) gets direct buys only.
 
 ## 4. Band keeping (rebalancing)
 
@@ -125,7 +125,7 @@ interface IIssuerAdapter {
     function token() external view returns (IERC20);
     function quoteCurrency() external view returns (Currency);           // native ETH or any ERC-20
     function mintPrice() external view returns (uint256 _ceiling);        // quote per token, WAD
-    function redeemPrice() external view returns (uint256 _floor);        // quote per token, WAD; 0 = no floor
+    function redeemPrice() external view returns (uint256 _floor);        // quote per token, WAD; 0 = same as mintPrice
     function maxRedeemNow() external view returns (uint256 _quoteOut);    // immediate exit capacity
     function mint(uint256 _quoteIn, uint256 _minTokens) external payable returns (uint256 _tokensOut);
     function redeem(uint256 _tokens, uint256 _minQuote) external returns (uint256 _quoteOut);
@@ -137,7 +137,9 @@ interface IIssuerAdapter {
 
 **Units.** Prices are WAD-scaled ratios of raw base units (`quote units × 1e18 / token units`), so `quote = tokens × price / 1e18` holds whatever the two tokens' decimals are.
 
-A token with mint but no redemption (such as a mint-only bonding curve) returns `redeemPrice() = 0` and gets a ceiling only.
+**Single price.** An issuer that mints and redeems at the same price returns `redeemPrice() = 0`, and the hook sets the floor equal to the ceiling. The band collapses to one price, so every swap is filled by the issuer at that price and the pool works as a converter, like the conversion hooks in §2. Any LP liquidity in the pool is arbitraged back to that price.
+
+A token with mint but no redemption (such as a mint-only bonding curve) returns `maxRedeemNow() = 0`. The hook never redeems, so the token gets a ceiling only.
 
 **The anchor rule:** the adapter's prices must never read the pool this hook guards.
 
