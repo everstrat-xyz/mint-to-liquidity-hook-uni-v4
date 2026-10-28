@@ -9,7 +9,7 @@ A generic Uniswap v4 hook that gives any **mintable token** a working market fro
 A new token needs a market, and a market needs liquidity. Today, minting a token and providing its liquidity are two separate steps, done by different people in different contracts:
 
 1. A user deposits into the issuer's contract to mint.
-2. Someone else pairs that token with ETH and deposits both into an AMM pool, then keeps the range in place.
+2. Someone else pairs that token with a quote asset (ETH, USDC, …) and deposits both into an AMM pool, then keeps the range in place.
 
 Until step 2 happens, the token has no market. Even once it has one, the issuer and the pool price the same token independently. Outside arbitrageurs close the gap when they bother to and keep the profit, while buyers overpay and sellers get too little.
 
@@ -68,8 +68,10 @@ A direct fill returns a `BeforeSwapDelta` (custom-curve pattern), so the v4 curv
 
 | Direction | Price | Settlement |
 | --- | --- | --- |
-| Buy (ETH → token) | ceiling `C` | `take` ETH → `adapter.mint{value}` → `sync` token → transfer to PoolManager → `settle` |
-| Sell (token → ETH) | floor `F` | `take` token → `adapter.redeem` → `settle{value}` ETH |
+| Buy (quote → token) | ceiling `C` | `take` quote → `adapter.mint` → pay token to the PoolManager |
+| Sell (token → quote) | floor `F` | `take` token → `adapter.redeem` → pay quote to the PoolManager |
+
+"Pay to the PoolManager" is `settle{value}` for native ETH, and `sync` → transfer → `settle` for an ERC-20.
 
 Exact-input and exact-output are both supported, and rounding always favours the issuer. A sell larger than the issuer's immediate exit capacity (`maxRedeemNow()`) is filled up to that capacity, and the rest goes to the curve. A token without a redemption price gets direct buys only.
 
@@ -83,23 +85,28 @@ A **rebalance** moves the pool price back to the nearest band edge. It runs:
 
 The band is read from the adapter once per transaction and cached in transient storage, so `beforeSwap` and `afterSwap` share a single read.
 
-**Price orientation.** `currency0 = ETH`, `currency1 = token`, so `sqrtPriceX96 = √(tokens per ETH)`. A token price `p` (ETH per token) maps to `√(1/p) × 2⁹⁶`. The ceiling therefore becomes the *lower* sqrtPrice bound and the floor the *upper* one.
+**Price orientation.** v4 orders a pool's currencies by address, and `sqrtPriceX96 = √(currency1 per currency0)`. Depending on the quote currency, the token can be either side (native ETH, address zero, is always `currency0`). `BandMath` converts a token price `p` (quote per token) into a sqrtPrice for both cases:
+
+| Token is | sqrtPriceX96 | Ceiling is the |
+| --- | --- | --- |
+| `currency1` (e.g. quote = ETH) | `√(1/p) × 2⁹⁶` | lower sqrtPrice bound |
+| `currency0` | `√p × 2⁹⁶` | upper sqrtPrice bound |
 
 ### 4.1 Above the ceiling (pool price > mint price `C`)
 
-1. The hook swaps token → ETH in the pool, with `sqrtPriceLimitX96` at `C`. The swap stops exactly at the ceiling and leaves the hook owing `t` tokens and owed `e` ETH.
-2. `take` ETH `e` from the PoolManager.
-3. `adapter.mint{value: ⌈t × C⌉}()` returns at least `t` tokens.
-4. `sync` → transfer `t` tokens to the PoolManager → `settle`.
-5. Profit `e − ⌈t × C⌉` (> 0, because every unit sold above `C`) and any token dust go to the beneficiary.
+1. The hook swaps token → quote in the pool, with `sqrtPriceLimitX96` at `C`. The swap stops exactly at the ceiling and leaves the hook owing `t` tokens and owed `q` quote.
+2. `take` quote `q` from the PoolManager.
+3. `adapter.mint(⌈t × C⌉, t)` returns at least `t` tokens.
+4. Pay `t` tokens to the PoolManager.
+5. Profit `q − ⌈t × C⌉` (> 0, because every unit sold above `C`) and any token dust go to the beneficiary.
 
 ### 4.2 Below the floor (pool price < redemption price `F`)
 
-1. The hook swaps ETH → token, exact output, with `sqrtPriceLimitX96` at `F`. The output is capped at `adapter.maxRedeemNow() / F`, so the redemption can always be paid out immediately.
+1. The hook swaps quote → token, exact output, with `sqrtPriceLimitX96` at `F`. The output is capped at `adapter.maxRedeemNow() / F`, so the redemption can always be paid out immediately.
 2. `take` the `t` tokens bought.
-3. `adapter.redeem(t)` returns `⌊t × F⌋` ETH.
-4. `settle{value: e}` for the ETH owed to the pool.
-5. Profit `⌊t × F⌋ − e` goes to the beneficiary.
+3. `adapter.redeem(t, ⌊t × F⌋)` returns `⌊t × F⌋` quote.
+4. Pay the `q` quote owed to the PoolManager.
+5. Profit `⌊t × F⌋ − q` goes to the beneficiary.
 
 Beyond the issuer's immediate exit capacity the floor is **soft**: the hook moves the price as far as that capacity allows and stops.
 
@@ -116,14 +123,19 @@ A token plugs in by deploying an adapter. The hook only ever talks to the adapte
 ```solidity
 interface IIssuerAdapter {
     function token() external view returns (IERC20);
-    function mintPrice() external view returns (uint256 _ceiling);        // ETH per token, WAD
-    function redeemPrice() external view returns (uint256 _floor);        // ETH per token, WAD; 0 = no floor
-    function maxRedeemNow() external view returns (uint256 _ethOut);      // immediate exit capacity
-    function mint(uint256 _minTokens) external payable returns (uint256 _tokensOut);
-    function redeem(uint256 _tokens, uint256 _minETH) external returns (uint256 _ethOut);
+    function quoteCurrency() external view returns (Currency);           // native ETH or any ERC-20
+    function mintPrice() external view returns (uint256 _ceiling);        // quote per token, WAD
+    function redeemPrice() external view returns (uint256 _floor);        // quote per token, WAD; 0 = no floor
+    function maxRedeemNow() external view returns (uint256 _quoteOut);    // immediate exit capacity
+    function mint(uint256 _quoteIn, uint256 _minTokens) external payable returns (uint256 _tokensOut);
+    function redeem(uint256 _tokens, uint256 _minQuote) external returns (uint256 _quoteOut);
     function beneficiary() external view returns (address);
 }
 ```
+
+**Quote currency.** Each adapter names the asset its issuer mints and redeems against: native ETH for Everstrat, USDC for most stablecoin and RWA issuers, the underlying for an ERC-4626 vault. For native ETH, `mint` takes `msg.value == _quoteIn`; for an ERC-20, the adapter pulls `_quoteIn` from the hook, which approves it at registration. `redeem` pays the quote to the caller.
+
+**Units.** Prices are WAD-scaled ratios of raw base units (`quote units × 1e18 / token units`), so `quote = tokens × price / 1e18` holds whatever the two tokens' decimals are.
 
 A token with mint but no redemption (such as a mint-only bonding curve) returns `redeemPrice() = 0` and gets a ceiling only.
 
@@ -136,8 +148,9 @@ A token with mint but no redemption (such as a mint-only bonding curve) returns 
 | `mintPrice()` | `evePremiumPriceInETH()` |
 | `redeemPrice()` | `eveBasePriceInETH()` |
 | `maxRedeemNow()` | `freeBalance()` |
-| `mint` | `enter{value}(_minTokens)` |
-| `redeem` | `exit(ethOut, _tokens, tolerance)`; reverts if it returns a non-zero `batchId` (a queued exit) |
+| `quoteCurrency()` | native ETH |
+| `mint` | `enter{value: _quoteIn}(_minTokens)` |
+| `redeem` | `exit(_minQuote, _tokens, tolerance)`; reverts if it returns a non-zero `batchId` (a queued exit) |
 
 Setup on the Everstrat side, through the 48h timelock:
 
@@ -163,14 +176,14 @@ The hook extends OpenZeppelin's audited `BaseHook` (`OpenZeppelin/uniswap-hooks`
 
 | Callback | Enabled | Why |
 | --- | --- | --- |
-| `beforeInitialize` | yes | Only pools registered with an adapter, with `currency0` = native ETH and `currency1` = `adapter.token()` |
+| `beforeInitialize` | yes | Only pools registered with an adapter, pairing `adapter.token()` with `adapter.quoteCurrency()` |
 | `beforeSwap` + `beforeSwapReturnDelta` | yes | Drift rebalance, then direct fill when the pool can't fill in band |
 | `afterSwap` | yes | Rebalance the user's push past an edge |
 | everything else | no | Liquidity is permissionless; LP fees are normal v4 fees |
 
 ### 6.2 Pool registration
 
-`registerPool(IIssuerAdapter _adapter, uint24 _fee, int24 _tickSpacing)` binds the pool to its adapter and initialises it at the band's midpoint. Only the adapter's owner can call it, so nobody can attach an issuer to a pool the issuer didn't authorise.
+`registerPool(IIssuerAdapter _adapter, uint24 _fee, int24 _tickSpacing)` builds the key from the adapter's token and quote currency, binds the pool to the adapter and initialises it at the band's midpoint. Only the adapter's owner can call it, so nobody can attach an issuer to a pool the issuer didn't authorise.
 
 ## 7. Safety rails
 
@@ -180,15 +193,15 @@ The hook extends OpenZeppelin's audited `BaseHook` (`OpenZeppelin/uniswap-hooks`
 | Queued exit | The adapter reverts, so the redemption is skipped; the hook never holds a queue position |
 | Exit capacity | Floor buys and direct sells are capped at `maxRedeemNow()` |
 | Invalid band | `mintPrice() == 0` or `redeemPrice() > mintPrice()` → hook stands aside, event emitted |
-| Leftover balances | Hook ends every transaction holding no ETH or tokens; profit and dust are swept to `beneficiary()` |
+| Leftover balances | Hook ends every transaction holding no quote or tokens; profit and dust are swept to `beneficiary()` |
 | Foreign pools | `beforeInitialize` reverts for unregistered keys |
 
 ## 8. Invariants (Foundry)
 
 1. After a rebalance that ran, the pool price is inside `[floor, ceiling]` (one-tick tolerance), or at the floor-side capacity limit.
 2. A direct fill never prices a buy below the ceiling or a sell above the floor.
-3. A rebalance never loses money: profit ≥ 0 in ETH.
-4. The hook holds no ETH or tokens between transactions.
+3. A rebalance never loses money: profit ≥ 0 in the quote currency.
+4. The hook holds no quote or tokens between transactions.
 5. The hook never causes a queued exit.
 6. No user swap reverts because of the hook.
 7. The issuer's redemption price per token never decreases as a result of a hook trade (mints happen at the ceiling, burns at the floor).
