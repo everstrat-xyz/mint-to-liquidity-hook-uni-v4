@@ -545,23 +545,21 @@ contract MintToLiquidityHook is BaseHook, IMintToLiquidityHook, IUnlockCallback 
         uint256 _available = _tokenCurrency.balanceOf(address(poolManager));
         uint256 _gross;
 
-        if (_exactInput) {
-            _tokens = Math.min(_amount, _available);
-            _gross = BandMath.quoteForTokensDown(_tokens, _floor);
-            if (_gross > _capacity) {
-                _gross = _capacity;
-                _tokens = BandMath.tokensForQuoteUp(_gross, _floor);
-            }
-        } else {
-            _gross = Math.min(_amount + ROUNDING_SLACK, _capacity);
-            _tokens = BandMath.tokensForQuoteUp(_gross, _floor);
-            if (_tokens > _available) {
-                _tokens = _available;
-                _gross = BandMath.quoteForTokensDown(_tokens, _floor);
-            }
+        // Size the fill from what the swapper asked for, then shrink it to what the PoolManager holds
+        // and what the issuer can pay out now.
+        _tokens = _exactInput ? _amount : BandMath.tokensForQuoteUp(_amount + ROUNDING_SLACK, _floor);
+        _tokens = Math.min(_tokens, _available);
+
+        // The issuer pays `floor(tokens * price)`. When that is above the capacity it would queue, so
+        // round the tokens down to what the capacity covers: rounding them up overshoots it.
+        if (BandMath.quoteForTokensDown(_tokens, _floor) > _capacity) {
+            _tokens = BandMath.tokensForQuoteDown(_capacity, _floor);
         }
+        _gross = BandMath.quoteForTokensDown(_tokens, _floor);
         if (_gross <= ROUNDING_SLACK) revert MintToLiquidityHookNothingToFill();
         _quote = _gross - ROUNDING_SLACK;
+        // Rounded-up tokens can be worth more than an exact output asked for; the surplus is swept.
+        if (!_exactInput && _quote > _amount) _quote = _amount;
 
         _tokenCurrency.take(poolManager, address(this), _tokens, false);
         _redeem(_adapter, _tokenCurrency, _tokens, _quote);

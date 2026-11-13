@@ -232,6 +232,25 @@ abstract contract MintToLiquidityHookTest is HookFixture {
         _assertHookHoldsNothing();
     }
 
+    function testFuzz_Swap_Sell_FilledAtAnyExitCapacity(uint256 _cap, bool _exactInput) public {
+        // Any capacity worth at least a base unit more than the slack, and less than the sell.
+        uint256 _floor = issuer.redeemPrice();
+        uint256 _sellValue = BandMath.quoteForTokensDown(TRADE_TOKENS, _floor);
+        _cap = bound(_cap, 2 * hook.ROUNDING_SLACK() + 2, _sellValue - 1);
+        issuer.setExitCap(_cap);
+
+        vm.recordLogs();
+        (uint256 _tokens, uint256 _quote) =
+            _exactInput ? _swap(false, true, TRADE_TOKENS) : _swap(false, false, _sellValue);
+
+        // The capped fill happens, never pays more than the issuer can, and never queues.
+        assertGt(_tokens, 0, "filled");
+        assertLe(_quote, _cap, "paid within the capacity");
+        assertEq(issuer.overCapacityRedemptions(), 0, "no queued exit");
+        assertEq(_countFills(vm.getRecordedLogs()), 1);
+        _assertHookHoldsNothing();
+    }
+
     function test_Swap_Sell_NoExitCapacity() public {
         issuer.setExitCap(0);
 
@@ -631,6 +650,15 @@ abstract contract MintToLiquidityHookTest is HookFixture {
     /*//////////////////////////////////////////////////////////////
                                 HELPERS
     //////////////////////////////////////////////////////////////*/
+
+    function _countFills(Vm.Log[] memory _logs) internal view returns (uint256 _count) {
+        for (uint256 _i; _i < _logs.length; ++_i) {
+            if (_logs[_i].emitter == address(hook) && _logs[_i].topics[0] == IMintToLiquidityHook.DirectFilled.selector)
+            {
+                _count++;
+            }
+        }
+    }
 
     /// @dev Decodes the last `Rebalanced` event recorded since `vm.recordLogs()`.
     function _lastRebalance() internal returns (uint256 _tokens, uint256 _quote, uint256 _profit) {

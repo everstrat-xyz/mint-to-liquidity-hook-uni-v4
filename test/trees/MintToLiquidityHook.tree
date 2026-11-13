@@ -67,7 +67,8 @@ MintToLiquidityHook::fillInternal
     ├── When the output is exact
     │   └── It should charge ceil((quote + slack) / floor) tokens
     ├── When the swap is worth more than the issuer's exit capacity
-    │   └── It should fill up to the capacity
+    │   ├── It should fill up to the capacity
+    │   └── It should round the tokens down so the redemption never exceeds the capacity
     ├── When the issuer has no exit capacity
     │   └── It should revert
     ├── When the PoolManager holds fewer tokens than the swap needs
