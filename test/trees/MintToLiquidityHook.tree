@@ -1,0 +1,121 @@
+MintToLiquidityHook::registerPool
+├── When the adapter is the zero address
+│   └── It should revert
+├── When the caller is not the adapter's owner
+│   └── It should revert
+├── When the fee is dynamic
+│   └── It should revert
+├── When the token is native or equals the quote currency
+│   └── It should revert
+├── When the pool is already registered
+│   └── It should revert
+├── When the adapter's band is invalid
+│   └── It should revert
+└── When the inputs are valid
+    ├── It should bind the pool to the adapter
+    ├── It should initialise the pool at the band's midpoint
+    └── It should emit PoolRegistered
+
+MintToLiquidityHook::beforeInitialize
+├── When the caller is not the PoolManager
+│   └── It should revert
+├── When the pool is not registered
+│   └── It should revert
+└── When the pool is registered
+    └── It should let the pool initialise
+
+MintToLiquidityHook::beforeSwap
+├── When the caller is not the PoolManager
+│   └── It should revert
+├── Given the band is invalid or cannot be read
+│   ├── It should emit BandInvalidated
+│   └── It should leave the swap to the curve
+├── Given the pool price is outside the band
+│   ├── When the rebalance would carry the price to or past the swapper's limit
+│   │   └── It should leave the rebalance to afterSwap
+│   ├── When the rebalance reverts
+│   │   ├── It should emit RebalanceSkipped
+│   │   └── It should not revert the swap
+│   └── When the rebalance succeeds
+│       └── It should move the price to the band edge before the swap runs
+├── Given the pool has no active liquidity
+│   └── It should fill the swap from the issuer
+├── Given the pool price is at the band edge the swap heads for
+│   └── It should fill the swap from the issuer
+├── Given the pool price is inside the band and the pool has liquidity
+│   └── It should leave the swap to the curve
+├── When the swapper's price limit does not allow the band edge
+│   └── It should leave the swap to the curve
+└── When the direct fill reverts
+    ├── It should emit DirectFillSkipped
+    └── It should leave the swap to the curve
+
+MintToLiquidityHook::fillInternal
+├── When the caller is not the hook
+│   └── It should revert
+├── When the swap is a buy
+│   ├── When the input is exact
+│   │   └── It should mint floor(quote / ceiling) tokens
+│   ├── When the output is exact
+│   │   ├── It should charge ceil(tokens * ceiling) quote
+│   │   └── It should send surplus tokens to the beneficiary
+│   └── When the PoolManager holds less quote than the swap needs
+│       └── It should fill up to the PoolManager's reserves
+└── When the swap is a sell
+    ├── When the input is exact
+    │   └── It should pay floor(tokens * floor) minus the rounding slack
+    ├── When the output is exact
+    │   └── It should charge ceil((quote + slack) / floor) tokens
+    ├── When the swap is worth more than the issuer's exit capacity
+    │   ├── It should fill up to the capacity
+    │   └── It should round the tokens down so the redemption never exceeds the capacity
+    ├── When the issuer has no exit capacity
+    │   └── It should revert
+    ├── When the PoolManager holds fewer tokens than the swap needs
+    │   └── It should fill up to the PoolManager's reserves
+    └── When the issuer pays one base unit less than tokens * floor
+        └── It should still fill
+
+MintToLiquidityHook::afterSwap
+├── Given beforeSwap filled the whole swap
+│   └── It should do nothing
+├── Given the swap pushed the price past the ceiling
+│   ├── It should mint at the ceiling and sell into the pool down to it
+│   └── It should send the profit to the beneficiary
+└── Given the swap pushed the price past the floor
+    ├── It should buy from the pool up to the floor and redeem at it
+    └── It should send the profit to the beneficiary
+
+MintToLiquidityHook::rebalance
+├── When the pool is not registered
+│   └── It should revert
+├── When the band is invalid
+│   └── It should revert
+├── Given the price is inside the band
+│   └── It should return false
+├── Given the price is above the ceiling
+│   ├── When the pool has no liquidity
+│   │   └── It should move the price to the ceiling without calling the issuer
+│   ├── When selling down to the ceiling pays less than the mint costs
+│   │   └── It should revert
+│   ├── When the issuer reverts
+│   │   └── It should revert
+│   └── When the trade is profitable
+│       ├── It should leave the price at the ceiling
+│       └── It should send the profit to the beneficiary
+└── Given the price is below the floor
+    ├── When the issuer has no exit capacity
+    │   └── It should revert
+    ├── When the exit capacity is less than the trade needs
+    │   └── It should buy what the capacity redeems and leave the price below the floor
+    └── When the trade is profitable
+        ├── It should leave the price at the floor
+        └── It should send the profit to the beneficiary
+
+MintToLiquidityHook::rebalanceInternal
+└── When the caller is not the hook
+    └── It should revert
+
+MintToLiquidityHook::unlockCallback
+└── When the caller is not the PoolManager
+    └── It should revert

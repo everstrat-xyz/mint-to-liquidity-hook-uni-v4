@@ -2,5 +2,28 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@uniswap/v4-core/=lib/uniswap-hooks/lib/v4-core/",
+    "@openzeppelin/contracts/=lib/uniswap-hooks/lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/uniswap-hooks/=lib/uniswap-hooks/src/",
+    "solmate/=lib/uniswap-hooks/lib/v4-core/lib/solmate/",
+    "interfaces/=src/interfaces/",
+    "libraries/=src/libraries/",
+    "adapters/=src/adapters/",
+]
 
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+[fuzz]
+runs = 1000
+
+[invariant]
+runs = 64
+depth = 48
+fail_on_revert = true
+
+# Fork tests read MAINNET_RPC_URL themselves and skip when it is unset, so a
+# missing RPC never breaks an offline `forge test`.
