@@ -225,14 +225,14 @@ The hook extends OpenZeppelin's audited `BaseHook` (`OpenZeppelin/uniswap-hooks`
 
 ## 9. Prototype scope
 
-**In:** the hook, `BandMath`, the adapter interface, `MockIssuer`, unit tests for every branch, fuzz tests for `BandMath`, invariant tests (§8), exact-input and exact-output in both directions through the v4 test router (with and without LPs), and a mainnet-fork test of `EverstratAMMAdapter` against the deployed AMM.
+**In:** the hook, `BandMath`, the adapter interface, `MockIssuer`, unit tests for every branch, fuzz tests for `BandMath`, invariant tests (§8), exact-input and exact-output in both directions through the v4 test router (with and without LPs), a deploy script, and mainnet-fork tests of the deployment, the adapter, band keeping and the Universal Router against the deployed Everstrat AMM and v4 PoolManager.
 
 **Out (production work):**
 
 - Gas profiling and a cheaper trigger, e.g. skipping the issuer read when the pool price is well inside the last known band
 - Rebating the out-of-band surplus to the swapper (`afterSwapReturnDelta`) instead of the protocol
 - An ERC-4626 adapter
-- Router and aggregator integration, audit
+- Router and aggregator integration beyond the settle-first order the fork tests prove (§11), quoter support, audit
 
 ## 10. Development
 
@@ -241,9 +241,43 @@ forge build
 forge test
 forge fmt --check
 
-# The Everstrat adapter and the hook against the deployed AMM and PoolManager
+# The deployment, the adapter, band keeping and the Universal Router against mainnet
 MAINNET_RPC_URL=<rpc> forge test --match-path 'test/fork/*'
 ```
+
+### Deploying
+
+`script/DeployMintToLiquidity.s.sol` deploys the hook and the Everstrat adapter, and registers the EVE/ETH pool when the deployer owns the adapter. Every variable is required; none has a default. See `.env.example`.
+
+| Variable | Meaning |
+| --- | --- |
+| `PRIVATE_KEY` | The deployer |
+| `POOL_MANAGER_ADDRESS` | Uniswap v4 PoolManager; mainnet `0x000000000004444c5dc75cB358380D2e3dE08A90` |
+| `EVERSTRAT_REGISTRY_ADDRESS` | Everstrat Registry; mainnet `0x46AA1bd55c19be90d8767e0C22732A7DD31D993D`. The AMM and EVE are read from it |
+| `ADAPTER_OWNER_ADDRESS` | May register pools for the adapter and change its beneficiary |
+| `BENEFICIARY_ADDRESS` | Receives the hook's profit (open question in §12) |
+| `POOL_FEE` | Static LP fee in pips; 3000 = 0.3% |
+| `TICK_SPACING` | The pool's tick spacing |
+
+```bash
+# Dry run against mainnet: simulates, prints addresses and the follow-up calls, sends nothing
+forge script script/DeployMintToLiquidity.s.sol --rpc-url $MAINNET_RPC_URL
+
+# Deploy
+forge script script/DeployMintToLiquidity.s.sol --rpc-url $MAINNET_RPC_URL --broadcast --verify
+```
+
+v4 reads a hook's permissions from the low 14 bits of its address. The script therefore mines a salt and deploys the hook through the CREATE2 deployer proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`), so the address is the same in a dry run, a broadcast and a fork test. The hook is created through a raw call to the proxy, so verify it explicitly if `--verify` does not pick it up:
+
+```bash
+forge verify-contract <hook> src/MintToLiquidityHook.sol:MintToLiquidityHook \
+  --constructor-args $(cast abi-encode "constructor(address)" $POOL_MANAGER_ADDRESS)
+```
+
+A dry run on 13 November 2026 sent two transactions for about 6.4M gas, about 0.0013 ETH at that day's base fee. After the script:
+
+1. **Register the pool** if the deployer does not own the adapter. The script prints the `registerPool` calldata for the owner to send to the hook.
+2. **Whitelist the adapter on Everstrat** while the invite period lasts. `AMM.enter` checks `msg.sender`, so until the 48h timelock executes `Whitelist.addToWhitelist([adapter])`, every mint fails and the hook stands aside. The script prints that calldata and the whitelist address.
 
 Tests are split as in `everstrat-xyz/contracts`:
 
@@ -252,19 +286,21 @@ Tests are split as in `everstrat-xyz/contracts`:
 | `test/unit` | Every branch of the hook and the adapter. The hook suite runs four times: native ETH quote, ERC-20 quote with the token as `currency0` and as `currency1`, and a 6-decimal quote |
 | `test/fuzz` | `BandMath` in isolation |
 | `test/invariant` | The §8 invariants over random sequences of swaps, NAV drift, pauses, capacity and liquidity changes, plus the sequences the campaign found |
-| `test/fork` | Mainnet fork; skipped when `MAINNET_RPC_URL` is unset |
+| `test/fork` | Mainnet fork, skipped when `MAINNET_RPC_URL` is unset. `DeployMintToLiquidityFork` runs the deploy script itself; `EverstratAMMAdapterFork` covers direct fills with no liquidity; `BandKeepingFork` pushes a pool with LP liquidity past either edge and lets the hook pull it back through real mints and redemptions; `UniversalRouterFork` swaps through the production router |
 | `test/trees` | Bulloak tree of the hook's branches |
 
 ## 11. Prototype findings
 
 What the build showed that the design above did not anticipate.
 
-- **Direct sells need tokens in the PoolManager.** A router pays the swapper's input in after the swap, so in `beforeSwap` the hook can only `take` what the PoolManager already holds. For the quote that is not a constraint on mainnet (the PoolManager holds ETH and USDC for every pool). For a new token it is: with no LPs and no other pool holding the token, the first sells cannot be filled directly. Buys work from block one. Options for production: seed a small token position, have the front end settle before it swaps (the Universal Router allows that order), or keep a token float in the hook.
+- **Direct sells need tokens in the PoolManager.** A router pays the swapper's input in after the swap, so in `beforeSwap` the hook can only `take` what the PoolManager already holds. For the quote that is not a constraint on mainnet (the PoolManager holds ETH and USDC for every pool). For a new token it is: with no LPs and no other pool holding the token, the first sells cannot be filled directly. Buys work from block one. The fork tests confirm this through the production Universal Router: the usual order (swap, then `SETTLE_ALL`) finds no market for EVE. The router also accepts `SETTLE` before the swap, and with that order the same sell is redeemed at NAV out of a pool with no liquidity (`UniversalRouterFork`). So a front end that settles first solves it without any change to the hook. Aggregators that settle after the swap still need a token float: LPs, or a small position the issuer seeds.
 - **Minting moves the band.** A mint at a premium raises the issuer's redemption price, so after its own mint the hook's ceiling is slightly higher than the one it traded against. The band cache has to be dropped after every hook trade (§4).
 - **The LP fee leaves a dead zone above the ceiling.** A rebalance from above pays the pool's fee, so a gap smaller than the fee cannot be closed at a profit (§4.1). Direct fills cover buyers in that zone.
 - **Issuers round twice.** The Everstrat AMM sizes exits in ETH and can pay one wei less than `tokens × price`. Hence `ROUNDING_SLACK` (§3). The one-wei bound holds while one EVE is worth no more than one ETH.
 - **Dust liquidity breaks naive settlement.** Through a few wei of liquidity a rebalance swap can move quote for zero tokens. The invariant campaign caught the hook leaving that delta unsettled, which reverted the user's swap; `test/invariant/Regressions.t.sol` keeps the sequences.
 - **Exact-output buys can outrun the pool.** See invariant 6. Filling the shortfall from the issuer inside the same swap is the "rebate or keep" question below, seen from the other side.
+- **Capped sells rounded the wrong way.** When the issuer's exit capacity was the limit, the hook rounded the tokens up, so the redemption was worth slightly more than the issuer could pay. The issuer refused it and the fill was skipped. No swap reverted, so the invariants did not flag it. A fork test with an uneven free balance raised the question and a fuzz test over arbitrary capacities confirmed it (`testFuzz_Swap_Sell_FilledAtAnyExitCapacity`). Tokens are now rounded down whenever capacity binds.
+- **A paused issuer and an empty pool.** A buy with no price limit drags an empty curve to the extreme tick. `afterSwap` puts the price back at the ceiling for free, because there is no liquidity to trade against and so no issuer call. The price stays sane while the issuer is paused.
 - **Gas.** On a mainnet fork, a 1 ETH buy of EVE through an empty pool costs about 1.27M gas and a sell about 1.55M. About 0.8M of each is the two NAV reads behind `mintPrice()` and `redeemPrice()`; the mint itself is about 0.27M. An adapter call that returns both prices from one NAV read is the first thing to add.
 
 ## 12. Open questions
