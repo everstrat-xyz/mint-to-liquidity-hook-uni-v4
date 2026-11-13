@@ -2,7 +2,7 @@
 
 A generic Uniswap v4 hook that gives any **mintable token** a working market from its first block. The token's issuer already knows its price: what a new token costs to mint and what one redeems for. The hook turns those two quotes into the pool's market. Buys can always fill at the mint price and sells at the redemption price, so no one has to seed the pool or run a market maker. LPs who join later trade inside that band and tighten the spread. The hook mints and redeems through the issuer to keep the pool inside the band, and the arbitrage profit goes to the protocol instead of to MEV bots.
 
-> Status: **prototype**. It exists to measure how hard the production hook is to build. It is unaudited and not for mainnet use.
+> Status: **prototype**. It exists to measure how hard the production hook is to build. It is unaudited and not for mainnet use. The hook, the Everstrat adapter and the tests are in this repository; what building it taught us is in [§11](#11-prototype-findings).
 
 ## 1. Problem
 
@@ -75,6 +75,12 @@ A direct fill returns a `BeforeSwapDelta` (custom-curve pattern), so the v4 curv
 
 Exact-input and exact-output are both supported, and rounding always favours the issuer. A sell larger than the issuer's immediate exit capacity (`maxRedeemNow()`) is filled up to that capacity, and the rest goes to the curve. A token with no exit capacity (`maxRedeemNow() = 0`) gets direct buys only.
 
+Three details of a fill:
+
+- **Sells pay one base unit below the floor.** An issuer that sizes redemptions in quote rounds twice and can pay one base unit less than `tokens × floor` (the Everstrat AMM does). The hook prices sells `ROUNDING_SLACK = 1` base unit lower, so such an issuer still covers the fill.
+- **A fill is capped at what the PoolManager holds.** The hook takes the input from the PoolManager before the swapper has paid it in, so it can take no more than the PoolManager's balance of that currency across all pools. See §11.
+- **The swapper's price limit is respected.** A swap whose `sqrtPriceLimitX96` does not allow the band edge is left to the curve.
+
 ## 4. Band keeping (rebalancing)
 
 A **rebalance** moves the pool price back to the nearest band edge. It runs:
@@ -83,7 +89,9 @@ A **rebalance** moves the pool price back to the nearest band edge. It runs:
 - in `afterSwap`, to correct the swapper's own push past an edge;
 - from `rebalance(PoolKey)`, which anyone can call (keeper backstop).
 
-The band is read from the adapter once per transaction and cached in transient storage, so `beforeSwap` and `afterSwap` share a single read.
+The band is read from the adapter once per transaction and cached in transient storage, so `beforeSwap` and `afterSwap` share a single read. The cache is dropped whenever the hook itself mints or redeems, because that trade moves the issuer's prices (a mint at a premium raises the redemption price) and the next decision has to see the new band.
+
+A rebalance in `beforeSwap` moves the price before the user's swap runs. When that would carry the price to or past the user's own price limit, which v4 rejects, the hook leaves the correction to `afterSwap`. A swap the issuer filled in full never reaches the curve, so `afterSwap` skips it.
 
 **Price orientation.** v4 orders a pool's currencies by address, and `sqrtPriceX96 = √(currency1 per currency0)`. Depending on the quote currency, the token can be either side (native ETH, address zero, is always `currency0`). `BandMath` converts a token price `p` (quote per token) into a sqrtPrice for both cases:
 
@@ -98,7 +106,9 @@ The band is read from the adapter once per transaction and cached in transient s
 2. `take` quote `q` from the PoolManager.
 3. `adapter.mint(⌈t × C⌉, t)` returns at least `t` tokens.
 4. Pay `t` tokens to the PoolManager.
-5. Profit `q − ⌈t × C⌉` (> 0, because every unit sold above `C`) and any token dust go to the beneficiary.
+5. Profit `q − ⌈t × C⌉` and any token dust go to the beneficiary.
+
+The pool charges its LP fee on the tokens the hook sells. When the price is above the ceiling by less than that fee, `q < ⌈t × C⌉` and the rebalance is skipped: the price stays where it is, and buys are filled directly at the ceiling (§3).
 
 ### 4.2 Below the floor (pool price < redemption price `F`)
 
@@ -130,6 +140,7 @@ interface IIssuerAdapter {
     function mint(uint256 _quoteIn, uint256 _minTokens) external payable returns (uint256 _tokensOut);
     function redeem(uint256 _tokens, uint256 _minQuote) external returns (uint256 _quoteOut);
     function beneficiary() external view returns (address);
+    function owner() external view returns (address);                    // who may register pools for this adapter
 }
 ```
 
@@ -140,6 +151,8 @@ interface IIssuerAdapter {
 **Single price.** An issuer that mints and redeems at the same price returns `redeemPrice() = 0`, and the hook sets the floor equal to the ceiling. The band collapses to one price, so every swap is filled by the issuer at that price and the pool works as a converter, like the conversion hooks in §2. Any LP liquidity in the pool is arbitraged back to that price.
 
 A token with mint but no redemption (such as a mint-only bonding curve) returns `maxRedeemNow() = 0`. The hook never redeems, so the token gets a ceiling only.
+
+**Approvals.** The hook approves the adapter for exactly the amount of each call (the quote before an ERC-20 `mint`, the tokens before a `redeem`) and clears what is left afterwards. It holds no standing approvals.
 
 **The anchor rule:** the adapter's prices must never read the pool this hook guards.
 
@@ -156,7 +169,7 @@ A token with mint but no redemption (such as a mint-only bonding curve) returns 
 
 Setup on the Everstrat side, through the 48h timelock:
 
-- whitelist the adapter (`AMM.enter` checks `msg.sender`);
+- whitelist the adapter (`AMM.enter` checks `msg.sender`). Only the hook can mint through the adapter, but anyone can buy from the pool, so this opens entry at the premium price to addresses that are not on the whitelist;
 - no new roles are needed. The adapter is an ordinary AMM user, and it approves the AMM so `burnFrom` can pull its EVE.
 
 ## 6. Contracts
@@ -170,6 +183,8 @@ Following the `everstrat-xyz/contracts` conventions (interfaces hold events, err
 | `src/interfaces/IIssuerAdapter.sol` | What an issuer implements (§5) |
 | `src/interfaces/IMintToLiquidityHook.sol` | Hook structs, events and errors |
 | `src/adapters/EverstratAMMAdapter.sol` | §5.1 |
+| `src/interfaces/adapters/IEverstratAMMAdapter.sol` | Adapter events and errors |
+| `src/interfaces/integrations/IEverstratAMM.sol` | The part of the Everstrat AMM the adapter calls |
 | `test/mocks/MockIssuer.sol` | Reference issuer with a premium-over-NAV mint and a NAV redeem |
 
 The hook extends OpenZeppelin's audited `BaseHook` (`OpenZeppelin/uniswap-hooks` v1.2.1) on `v4-core`, and is compiled with solc `0.8.26` (PoolManager's pinned version).
@@ -205,7 +220,7 @@ The hook extends OpenZeppelin's audited `BaseHook` (`OpenZeppelin/uniswap-hooks`
 3. A rebalance never loses money: profit ≥ 0 in the quote currency.
 4. The hook holds no quote or tokens between transactions.
 5. The hook never causes a queued exit.
-6. No user swap reverts because of the hook.
+6. No user swap reverts because of the hook. One case is outside the hook's reach: an exact-output buy for more tokens than the pool holds once the hook has brought the price back into the band. v4 reverts such an order on any pool.
 7. The issuer's redemption price per token never decreases as a result of a hook trade (mints happen at the ceiling, burns at the floor).
 
 ## 9. Prototype scope
@@ -224,10 +239,35 @@ The hook extends OpenZeppelin's audited `BaseHook` (`OpenZeppelin/uniswap-hooks`
 ```bash
 forge build
 forge test
-forge fmt --check src/ test/
+forge fmt --check
+
+# The Everstrat adapter and the hook against the deployed AMM and PoolManager
+MAINNET_RPC_URL=<rpc> forge test --match-path 'test/fork/*'
 ```
 
-## 11. Open questions
+Tests are split as in `everstrat-xyz/contracts`:
+
+| Folder | What it covers |
+| --- | --- |
+| `test/unit` | Every branch of the hook and the adapter. The hook suite runs four times: native ETH quote, ERC-20 quote with the token as `currency0` and as `currency1`, and a 6-decimal quote |
+| `test/fuzz` | `BandMath` in isolation |
+| `test/invariant` | The §8 invariants over random sequences of swaps, NAV drift, pauses, capacity and liquidity changes, plus the sequences the campaign found |
+| `test/fork` | Mainnet fork; skipped when `MAINNET_RPC_URL` is unset |
+| `test/trees` | Bulloak tree of the hook's branches |
+
+## 11. Prototype findings
+
+What the build showed that the design above did not anticipate.
+
+- **Direct sells need tokens in the PoolManager.** A router pays the swapper's input in after the swap, so in `beforeSwap` the hook can only `take` what the PoolManager already holds. For the quote that is not a constraint on mainnet (the PoolManager holds ETH and USDC for every pool). For a new token it is: with no LPs and no other pool holding the token, the first sells cannot be filled directly. Buys work from block one. Options for production: seed a small token position, have the front end settle before it swaps (the Universal Router allows that order), or keep a token float in the hook.
+- **Minting moves the band.** A mint at a premium raises the issuer's redemption price, so after its own mint the hook's ceiling is slightly higher than the one it traded against. The band cache has to be dropped after every hook trade (§4).
+- **The LP fee leaves a dead zone above the ceiling.** A rebalance from above pays the pool's fee, so a gap smaller than the fee cannot be closed at a profit (§4.1). Direct fills cover buyers in that zone.
+- **Issuers round twice.** The Everstrat AMM sizes exits in ETH and can pay one wei less than `tokens × price`. Hence `ROUNDING_SLACK` (§3). The one-wei bound holds while one EVE is worth no more than one ETH.
+- **Dust liquidity breaks naive settlement.** Through a few wei of liquidity a rebalance swap can move quote for zero tokens. The invariant campaign caught the hook leaving that delta unsettled, which reverted the user's swap; `test/invariant/Regressions.t.sol` keeps the sequences.
+- **Exact-output buys can outrun the pool.** See invariant 6. Filling the shortfall from the issuer inside the same swap is the "rebate or keep" question below, seen from the other side.
+- **Gas.** On a mainnet fork, a 1 ETH buy of EVE through an empty pool costs about 1.27M gas and a sell about 1.55M. About 0.8M of each is the two NAV reads behind `mintPrice()` and `redeemPrice()`; the mint itself is about 0.27M. An adapter call that returns both prices from one NAV read is the first thing to add.
+
+## 12. Open questions
 
 - **Where Everstrat's profit goes.** To the Controller (it accrues to NAV for every holder) or to the AMM (it adds immediate exit capacity)?
 - **Rebate or keep.** The swapper who pushes past an edge overpays for that portion. Should the hook keep the surplus, or refund it so the swapper gets the price they would have got by splitting the order with the issuer?
